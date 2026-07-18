@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ocloud-telemetry-agent
+  namespace: ocloud-telemetry
+  labels: {app: ocloud-telemetry-agent}
+spec:
+  selector:
+    matchLabels: {app: ocloud-telemetry-agent}
+  template:
+    metadata:
+      labels: {app: ocloud-telemetry-agent}
+    spec:
+      serviceAccountName: ocloud-telemetry-agent
+      # hostPID gives /proc a view of every host process. This REPLACES nsenter:
+      # the predecessor spawned ~80 fork+exec per sample to reach host /proc,
+      # which inflated both overhead and the sampling window.
+      hostPID: true
+      nodeSelector:
+        kubernetes.io/hostname: joule
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: agent
+          image: bmw.ece.ntust.edu.tw/ravi/ocloud-telemetry-agent:0.1.0
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "-m", "agent.main", "serve"]
+          securityContext:
+            runAsUser: 0          # energy_uj is 0400 root:root (CVE-2020-8694)
+            runAsGroup: 0
+            capabilities:
+              add:
+                - SYS_PTRACE      # read other processes' /proc/<pid>/task
+                - PERFMON         # bypasses perf_event_paranoid=2 (kernel >=5.8)
+                - SYS_ADMIN       # some perf event classes
+          env:
+            - name: NODE_NAME
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+            - name: SAMPLE_INTERVAL
+              value: "1.0"
+            - name: RUNS_DIR
+              value: "/mnt/debugging-logs/runs"
+            - name: GNB_COMM
+              value: "gnb,nr-softmodem"     # RAN-agnostic: config, not code
+            - name: GNB_CONFIG_PATH
+              value: "/mnt/debugging-logs/gnb-config.yml"
+            - name: ENABLE_PERF
+              value: "true"
+            - name: PERF_WINDOW
+              value: "1.0"
+            - name: THREAD_MIN_PCT
+              value: "0.0"
+            - name: ENABLE_UNCORE
+              value: "true"          # aperf/mperf, hw C-states, IMC bandwidth
+            - name: UNCORE_WINDOW
+              value: "1.0"
+            - name: UNCORE_PROBE
+              value: "false"         # UPI + AVX512 clipping; enable during sweep
+            - name: ENABLE_CPUFREQ
+              value: "true"
+            - name: ENABLE_NUMA
+              value: "true"
+            - name: WATCH_PCI
+              value: "0000:ca:01.3"  # fronthaul VF; NUMA-alignment check
+            # Redfish is OFF by default here: joule cannot route to its own BMC.
+            # Run tools/redfish_probe.py from 192.168.8.78 and join on run_id.
+            - name: REDFISH_URL
+              value: ""
+            - name: API_PORT
+              value: "5010"
+          ports:
+            - name: api
+              containerPort: 5010
+          volumeMounts:
+            - {name: sys, mountPath: /sys, readOnly: true}
+            - {name: logs, mountPath: /mnt/debugging-logs}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+          livenessProbe:
+            # exec, not httpGet: with a Multus second interface the kubelet's
+            # probe reply can exit the wrong interface and the probe fails even
+            # though the process is healthy.
+            exec:
+              command: ["python3", "-c", "import socket,sys; s=socket.socket(); sys.exit(s.connect_ex(('127.0.0.1',5010)))"]
+            initialDelaySeconds: 15
+            periodSeconds: 20
+      volumes:
+        - name: sys
+          hostPath: {path: /sys, type: Directory}
+        - name: logs
+          hostPath: {path: /mnt/debugging-logs, type: DirectoryOrCreate}

@@ -1,0 +1,99 @@
+{
+  "$comment": [
+    "PM Dictionary for an O-Cloud node resource type hosting a Split 7.2x O-DU.",
+    "O-RAN.WG6.TS.O2IMS-INTERFACE-R005-v12.00 clause 3.7 specifies the",
+    "O2ims_InfrastructurePerformance lifecycle but NOT the report format.",
+    "O-RAN.WG6.TS.O-Cloud IM-R005-v07.00 references PerformanceMeasureDictionary",
+    "in the WG10 IM/DM and does not define measurement names.",
+    "O-RAN.WG6.TR.O-CLOUD-ES-R004-v03.00 clause 6.2.2.1 states the PM dictionary",
+    "is provided by the O-Cloud Resource type vendor.",
+    "The vocabulary is therefore vendor-defined. This is a proposed profile."
+  ],
+  "dictionaryId": "urn:ntust:bmw:pm-dict:ocloud-du:0.1.0",
+  "resourceTypeName": "ocloud-node-odu-7.2x",
+  "version": "0.1.0",
+  "platform": {
+    "verifiedOn": "joule / StarlingX 24.09 / kernel 6.6.0-1-rt-amd64",
+    "date": "2026-07-17"
+  },
+  "measurementGroups": [
+    {
+      "measurementGroup": "OCloudNodeEnergy",
+      "specReference": "O-RAN.WG6.TR.O-CLOUD-ES-R004-v03.00 Table 6.2-2",
+      "collectedMeasurements": [
+        {"measurementName": "ECnodePackage", "unit": "J", "source": "RAPL intel-rapl:N",
+         "status": "available", "perSocket": true},
+        {"measurementName": "ECnodeDram", "unit": "J", "source": "RAPL intel-rapl:N:M name=dram",
+         "status": "available", "perSocket": true},
+        {"measurementName": "ECnodeCore", "unit": "J", "source": "RAPL PP0",
+         "status": "UNAVAILABLE",
+         "note": "No PP0 domain on this Xeon. The TR names EC_node,core as the metric to use for CPU-bound workloads; server-class Xeons do not expose it."},
+        {"measurementName": "ECnodeUncore", "unit": "J", "source": "RAPL PP1",
+         "status": "UNAVAILABLE"},
+        {"measurementName": "ECnodeOther", "unit": "J",
+         "source": "derived: platform - (package + dram)",
+         "status": "derived",
+         "note": "Requires BOTH Redfish and RAPL. Neither source alone can produce the TR's own metric set."},
+        {"measurementName": "ECnodePlatform", "unit": "J",
+         "source": "Redfish PowerConsumedWatts integrated over the window",
+         "status": "available-offnode",
+         "note": "No psys RAPL domain. joule cannot route to its own BMC; collected off-node and joined by run_id."},
+        {"measurementName": "ECnodeAcc", "unit": "J", "status": "UNAVAILABLE",
+         "note": "No hardware accelerator on this node."}
+      ]
+    },
+    {
+      "measurementGroup": "OCloudNodePower",
+      "specReference": "O-RAN.WG6.TR.O-CLOUD-ES-R004-v03.00 Table 6.2-1",
+      "collectedMeasurements": [
+        {"measurementName": "PowerConsumed", "unit": "W", "source": "Redfish PowerConsumedWatts"},
+        {"measurementName": "PowerCapacity", "unit": "W", "source": "Redfish PowerCapacityWatts"},
+        {"measurementName": "AveragePowerConsumed", "unit": "W", "source": "PM job semantic transformation"},
+        {"measurementName": "MaxPowerConsumed", "unit": "W", "source": "PM job semantic transformation"},
+        {"measurementName": "MinPowerConsumed", "unit": "W", "source": "PM job semantic transformation"}
+      ]
+    },
+    {
+      "measurementGroup": "OCloudNodeCpu",
+      "specReference": "O-RAN.WG6.TR.O-CLOUD-ES-R004-v03.00 clause 5.2.2 Step 1 (UC2 telemetry)",
+      "collectedMeasurements": [
+        {"measurementName": "cpuAverageUtilization", "unit": "percent",
+         "source": "/proc/stat delta ratio", "perCpu": true,
+         "note": "Example name taken from O-Cloud IM measurementSelectionCriteria."},
+        {"measurementName": "cpuFrequencyDelivered", "unit": "MHz",
+         "source": "MSR aperf/mperf",
+         "note": "NOT scaling_cur_freq, which reports the requested P-state, not the delivered frequency."},
+        {"measurementName": "cpuTemperature", "unit": "Celsius", "source": "Redfish Thermal"},
+        {"measurementName": "cpuCStateResidency", "unit": "percent",
+         "source": "/sys/devices/system/cpu/cpuN/cpuidle/stateM/time", "perCpu": true,
+         "note": "UC3 clause 5.3.3.2 states no measurement data is required. This measurement is what proves whether a requested C-state configuration took effect."}
+      ]
+    },
+    {
+      "measurementGroup": "ContainerUtilization",
+      "specReference": "O-RAN.WG6.TR.O-CLOUD-ES-R004-v03.00 Table 6.3-2",
+      "collectedMeasurements": [
+        {"measurementName": "cpuTime", "unit": "us",
+         "source": "/proc/<pid>/task/<tid>/stat utime+stime, cgroup-attributed",
+         "note": "The TR names this as the input for power estimation models; TS 28.554 clause 6.7.3.1.4 estimates NF energy from mean vCPU usage. Validity for poll-mode workloads is what this platform measures."}
+      ]
+    },
+    {
+      "measurementGroup": "PollModeWorkload",
+      "extension": true,
+      "specReference": "O2IMS TS clause 3.7.6.2.2 extensions (writeable when preInstalledJob is False)",
+      "$comment": "Not defined by any O-RAN or 3GPP document. Proposed here because CPU-time-proportional estimators cannot discriminate a spinning loop from useful work, and these can.",
+      "collectedMeasurements": [
+        {"measurementName": "instructionsRetired", "unit": "count", "source": "perf instructions"},
+        {"measurementName": "instructionsPerCycle", "unit": "ratio", "source": "perf instructions/cycles"},
+        {"measurementName": "mpki", "unit": "ratio", "source": "perf 1000*cache-misses/instructions"},
+        {"measurementName": "c0Residency", "unit": "percent", "source": "1 - sum(cpuidle stateM/time)/window"},
+        {"measurementName": "contextSwitches", "unit": "count", "source": "perf context-switches"},
+        {"measurementName": "cpuMigrations", "unit": "count", "source": "perf cpu-migrations"},
+        {"measurementName": "runDelay", "unit": "ns", "source": "/proc/schedstat rq wait time"},
+        {"measurementName": "pollBusyness", "unit": "percent", "source": "DPDK lcore poll busyness telemetry",
+         "status": "conditional", "note": "Only if the DPDK build enabled it."}
+      ]
+    }
+  ]
+}

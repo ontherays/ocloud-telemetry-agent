@@ -1,0 +1,13 @@
+[project]
+name = "ocloud-telemetry-agent"
+version = "0.1.0"
+description = "RAN-agnostic O-Cloud CPU and energy telemetry for Split 7.2x O-DU characterisation"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+api = ["flask>=2.0"]
+influx = ["influxdb-client>=1.30"]
+
+[tool.setuptools.packages.find]
+include = ["agent*"]

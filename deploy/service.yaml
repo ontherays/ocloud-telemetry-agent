@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: ocloud-telemetry-agent
+  namespace: ocloud-telemetry
+spec:
+  selector: {app: ocloud-telemetry-agent}
+  ports:
+    - {name: api, port: 5010, targetPort: 5010}
