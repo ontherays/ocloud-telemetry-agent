@@ -30,8 +30,6 @@ SCHEMAS = {
                        "tsc", "delivered_ratio"],
     "cstate_hw": ["t_utc", "t_offset_s", "window_s", "c1_residency",
                   "c6_residency"],
-    "membw_imc": ["t_utc", "t_offset_s", "window_s", "imc", "socket",
-                  "read_mib", "write_mib"],
     "membw_socket": ["t_utc", "t_offset_s", "window_s", "socket",
                      "read_mib", "write_mib", "total_mib"],
 }

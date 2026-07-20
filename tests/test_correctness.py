@@ -121,48 +121,71 @@ def test_cpuset():
     check("None is empty", parse_cpuset(None) == set())
 
 
-def test_imc_socket_sum():
-    print("\nIMC per-socket bandwidth = sum of IMCs on that socket (F17)")
+def test_membw_per_node():
+    print("\nmemory bandwidth via perf --per-node (verified format, F17 fixed)")
     from agent.collectors.uncore import UncoreCollector
-    c = UncoreCollector.__new__(UncoreCollector)
-    c.window = 1.0
-    c.target_cpus = []
-    c.enable_probe = False
-    # two IMCs on socket 0, one on socket 1
-    c._imc = {"uncore_imc_0": 0, "uncore_imc_1": 0, "uncore_imc_8": 1}
-
     import agent.collectors.uncore as U
-    real = U._run
-    def fake(events, window, cpus=None):
-        if any("cas_count" in e for e in events):
-            return {"uncore_imc_0/cas_count_read/": 100.0,
-                    "uncore_imc_0/cas_count_write/": 50.0,
-                    "uncore_imc_1/cas_count_read/": 200.0,
-                    "uncore_imc_1/cas_count_write/": 25.0,
-                    "uncore_imc_8/cas_count_read/": 10.0,
-                    "uncore_imc_8/cas_count_write/": 5.0}
-        if "aperf" in "".join(events):
+
+    # Exact -x , --per-node output captured from joule 2026-07-18:
+    real_lines = [
+        "N0,1,199.87,MiB,uncore_imc/cas_count_read/,12074958183,100.00,,",
+        "N0,1,89.92,MiB,uncore_imc/cas_count_write/,12070278197,100.00,,",
+        "N1,1,293.57,MiB,uncore_imc/cas_count_read/,12020030181,100.00,,",
+        "N1,1,226.15,MiB,uncore_imc/cas_count_write/,12015468348,100.00,,",
+    ]
+
+    class FakeProc:
+        returncode = 0
+        stderr = "\n".join(real_lines)
+    real_run = U.subprocess.run
+    U.subprocess.run = lambda *a, **k: FakeProc()
+    try:
+        nodes = U._run_per_node(
+            ["uncore_imc/cas_count_read/", "uncore_imc/cas_count_write/"], 1.0)
+    finally:
+        U.subprocess.run = real_run
+
+    check("both nodes parsed", set(nodes.keys()) == {0, 1}, nodes)
+    check("N0 read = 199.87",
+          abs(nodes[0]["uncore_imc/cas_count_read/"] - 199.87) < 1e-6)
+    check("N1 read = 293.57 (socket 1, the gNB socket)",
+          abs(nodes[1]["uncore_imc/cas_count_read/"] - 293.57) < 1e-6)
+    check("N1 write = 226.15",
+          abs(nodes[1]["uncore_imc/cas_count_write/"] - 226.15) < 1e-6)
+
+    # And the full measure() assembly, freq + membw together
+    def fake_run(events, window, cpus=None):
+        j = "".join(events)
+        if "aperf" in j:
             return {"msr/aperf/": 1480.0, "msr/mperf/": 1000.0, "msr/tsc/": 1000.0}
+        if "c1-residency" in j:
+            return {"cstate_core/c1-residency/": 22316784.0,
+                    "cstate_core/c6-residency/": 0.0}
         return {}
-    U._run = fake
+    def fake_per_node(events, window):
+        return {0: {"uncore_imc/cas_count_read/": 199.87,
+                    "uncore_imc/cas_count_write/": 89.92},
+                1: {"uncore_imc/cas_count_read/": 293.57,
+                    "uncore_imc/cas_count_write/": 226.15}}
+    rr, rpn = U._run, U._run_per_node
+    U._run, U._run_per_node = fake_run, fake_per_node
+    c = UncoreCollector.__new__(UncoreCollector)
+    c.window = 1.0; c.target_cpus = [5]; c.enable_probe = False; c._n_imc = 12; c._err = ""
     try:
         r = c.measure(1.0)
     finally:
-        U._run = real
+        U._run, U._run_per_node = rr, rpn
     ps = r["mem_bw"]["per_socket"]
-    check("socket 0 read = 100+200 = 300", abs(ps[0]["read_mib"] - 300.0) < 1e-6, ps[0])
-    check("socket 0 write = 50+25 = 75", abs(ps[0]["write_mib"] - 75.0) < 1e-6, ps[0])
-    check("socket 1 read = 10", abs(ps[1]["read_mib"] - 10.0) < 1e-6, ps[1])
-    check("socket 0 total = 375", abs(ps[0]["total_mib"] - 375.0) < 1e-6, ps[0])
-    check("raw per-imc preserved", len(r["mem_bw"]["per_imc"]) == 3)
-    check("delivered ratio 1.48", abs(r["freq"]["delivered_ratio"] - 1.48) < 1e-6,
-          r["freq"]["delivered_ratio"])
+    check("socket 1 total = 293.57+226.15 = 519.72",
+          abs(ps[1]["total_mib"] - 519.72) < 1e-6, ps[1])
+    check("delivered ratio 1.48", abs(r["freq"]["delivered_ratio"] - 1.48) < 1e-6)
+    check("c6 residency 0", r["cstate"]["c6_residency"] == 0.0)
 
 
 if __name__ == "__main__":
     for fn in (test_stale_guard, test_all_idle_states_count, test_rapl_wrap,
                test_rapl_keyed_by_dir, test_parse_stat, test_cpuset,
-               test_imc_socket_sum):
+               test_membw_per_node):
         fn()
     print("\n%s" % ("-" * 52))
     if FAIL:

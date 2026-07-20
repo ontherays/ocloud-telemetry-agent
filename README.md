@@ -42,7 +42,7 @@ one environment variable:
 | Redfish (off-node) | whole-box watts | EC_node,platform |
 | `msr/aperf,mperf` | **delivered** frequency (not requested) | throttle-proofs energy |
 | `cstate_core/*-residency` | hardware C-states | cross-check for stale sysfs |
-| `uncore_imc_*` | memory bandwidth, per-socket | NUMA / bottleneck analysis |
+| `perf --per-node` | memory bandwidth, per-socket | NUMA / bottleneck analysis |
 | NUMA sysfs | placement, FH-VF alignment | correctness (500us deadlines) |
 
 ## Quickstart — the A/B protocol
@@ -56,6 +56,18 @@ sudo python3 -m agent.once --label A-idle-no-gnb --window 30   # x3
 # deploy the gNB, then within minutes:
 sudo python3 -m agent.once --label B-gnb-idle --window 30      # x3
 ```
+
+Auto-detecting capture (the framework decides the state, not you):
+
+```bash
+sudo ./tools/run_campaign.sh          # detect current state, capture once
+sudo ./tools/run_campaign.sh --watch  # re-detect + capture each cycle
+```
+
+It classifies A (no gNB) / B (gNB, no UE) / B-ue (gNB + UE, no traffic) /
+C (iperf running). It NEVER generates traffic — iperf is driven by the r-App;
+the script only detects it and labels the run. A pod Running while the gNB
+process is absent (the O1-timeout restart loop) is reported, not labelled.
 
 Or as a DaemonSet:
 

@@ -77,7 +77,36 @@ are not re-derived.
 | F14 | **RETRACTED.** Earlier claim "uncore PMU absent" was a wrong event *name* (`uncore_upi`, correct: `uncore_upi_0`). joule exposes the full fabric: `uncore_imc_0..15`, `uncore_upi_0..2`, `uncore_cha_0..15`, `uncore_pcu`, `uncore_m3upi_*`. | `perf list`, `ls /sys/devices \| grep uncore` |
 | F15 | `scaling_cur_freq` = requested P-state, not delivered. Delivered ratio = `msr/aperf/ ÷ msr/mperf/`; measured 1.48 at one instant. Both readable. Recorded so the sweep's energy comparison can be shown free of thermal throttling. | `perf stat -e msr/aperf/,msr/mperf/,msr/tsc/` |
 | F16 | **Hardware C-state counters exist and validate the stale-sysfs finding (M1).** `cstate_core/c1-residency`, `/c6-residency` readable per-core. cpu5: c1=22316784, **c6=0** — C6 genuinely never entered, confirming F1 from an independent counter path. | `perf stat -e cstate_core/... -C 5` |
-| F17 | **Memory bandwidth is countable per IMC.** `uncore_imc_N/cas_count_read,write` report MiB directly. **16 IMC instances**, each `cpumask` = a 2-CPU group → per-socket bandwidth = sum of IMCs on that socket. | `perf stat -e uncore_imc_0/cas_count_read/`, `cat uncore_imc_0/cpumask` = 0-1 |
+| F17 | **Memory bandwidth is per-socket via `perf --per-node`.** The sysfs `cpumask` does NOT give the socket -- all 12 IMCs report `cpumask 0-1` (it names the *reader* CPU, not the IMC's socket). `perf stat -a --per-node` uses perf's own authoritative IMC->node map. Measured idle-with-gNB: N0 (idle socket) ~200 MiB read, N1 (gNB socket) ~294 MiB read. | `perf stat -x , -a --per-node -e uncore_imc/cas_count_read/` |
 | F18 | UPI cross-socket traffic is countable (`uncore_upi_0`, nonzero+varying) but **deferred** — VF is NUMA-aligned so cross-socket pressure may be minor; confirm it matters under load first. | `perf stat -e uncore_upi_0/event=0x2,umask=0x0f/` |
 | F19 | AVX-512 frequency-clipping counter exists (`uncore_pcu`), reads **0 at idle**. Probe-only until nonzero under the sweep. | `perf stat -e uncore_pcu/event=0x74/` = 0 |
 | F20 | perf runs unprivileged but userspace-only (`:u`) at `perf_event_paranoid=2`. Full counters need CAP_PERFMON (the DaemonSet has it) or root. | `perf stat -e instructions` shows `instructions:u` |
+
+## Hardware validation (2026-07-18, full agent on joule)
+
+First run of the complete 10-collector agent on real hardware. gNB was up (28h),
+so this is a gNB-idle capture, not baseline A. All values reproducible across 6
+samples.
+
+| Metric | Value | Note |
+|---|---|---|
+| package-1 (gNB socket) | **76.93 W** | matches deployment C (76.99 W) to 0.06 W |
+| package-0 (control) | 64.62 W | idle socket, unchanged |
+| delivered freq ratio | **1.4762**, steady | aperf/mperf; throttle baseline for the sweep |
+| C6 residency | **0** everywhere | F16 confirmed on hardware: C6 never entered |
+| C1 residency | ~25.3e9 cyc/window | cores park in C1 |
+| mem BW socket 1 (gNB) | ~294 MiB read / 226 write | via --per-node (F17 fix) |
+| mem BW socket 0 (idle) | ~200 MiB read / 90 write | control |
+| IPC | **0.61** | low at idle (poll spinning); expect rise under load |
+| MPKI | 0.70 | cache-miss rate baseline |
+
+The IPC-rises-while-occupancy-stays-flat prediction now has its idle anchor.
+
+## Capture-framework detection (2026-07-18)
+
+| # | Finding | Evidence |
+|---|---|---|
+| D1 | gNB metrics port **8001 not reachable from host** (pod netns only). ESTAB `:8001` connections are StarlingX pmond/collectd, unrelated. | `ss -tlnp \| grep 8001` empty; curl times out |
+| D2 | **No host metrics log file.** gNB metrics go to pod stdout; `nof_ues` read via `kubectl logs`, or host log if METRICS_LOG is set. | `ls /mnt/debugging-logs/*.log` empty |
+| D3 | **gNB liveness = pod Running AND pgrep gnb.** Pod-alone reads Running during the O1-timeout restart loop. Disagreement = restart-loop signal; framework reports rather than mislabels. | classifier design |
+| D4 | **iperf is r-App-driven only.** Framework never generates traffic; detects iperf3 and labels C. Keeps the agent observational / RAN-agnostic. | design decision |

@@ -179,12 +179,6 @@ class Agent:
                     "c1_residency": cs.get("c1_residency"),
                     "c6_residency": cs.get("c6_residency")})])
             mb = uc.get("mem_bw") or {}
-            imc_rows = []
-            for imc, v in (mb.get("per_imc") or {}).items():
-                imc_rows.append(dict(b2, imc=imc, socket=v.get("socket"),
-                                     read_mib=v.get("read_mib"),
-                                     write_mib=v.get("write_mib")))
-            sink.write("membw_imc", imc_rows)
             soc_rows = []
             for sock, v in (mb.get("per_socket") or {}).items():
                 soc_rows.append(dict(b2, socket=sock,
