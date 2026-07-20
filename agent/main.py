@@ -18,6 +18,7 @@ import time
 from .config import Config
 from .collectors.cpufreq import CpuFreqThermalCollector
 from .collectors.cpuidle import CpuIdleCollector
+from .collectors.health import HealthCollector
 from .collectors.numa import NumaCollector
 from .collectors.perf import PerfCollector
 from .collectors.procstat import ProcStatCollector
@@ -96,6 +97,7 @@ class Agent:
         self.sampler = None
         (self.topo, self.static, self.collectors, self.perf, self.uncore,
          self.skipped) = build(cfg)
+        self.health = HealthCollector(interval=cfg.health_interval) if cfg.enable_health else None
         for k, v in self.skipped.items():
             log("collector %-9s SKIPPED: %s" % (k, v))
         log("collectors active: %s%s%s"
@@ -221,6 +223,13 @@ class Agent:
             if not archived:
                 log("WARN: no gnb-config.yml at %s - run is NOT reproducible"
                     % self.cfg.gnb_config_path)
+            if self.health:
+                try:
+                    import json as _json
+                    with open(run.path("health.json"), "w") as _f:
+                        _json.dump(self.health.check(force=True), _f, indent=2, default=str)
+                except Exception as _e:
+                    log("health snapshot failed: %r" % _e)
 
             self.run, self.sink = run, sink
             self.sampler = Sampler(self.collectors, self.cfg.interval,
@@ -259,6 +268,7 @@ class Agent:
                               + (["perf"] if self.perf else [])
                               + (["uncore"] if self.uncore else []),
                 "skipped": self.skipped,
+                "health": (self.health.check().get("ok") if self.health else None),
             }
 
 
@@ -273,6 +283,15 @@ def cmd_once(cfg, args):
     for f in sorted(os.listdir(d)):
         print("  %s" % f)
     return 0
+
+
+def cmd_health(cfg, args):
+    from .collectors.health import HealthCollector
+    import json
+    h = HealthCollector(interval=0)
+    r = h.check(force=True)
+    print(json.dumps(r, indent=2, default=str))
+    return 0 if r['ok'] else 1
 
 
 def cmd_serve(cfg, args):
@@ -291,6 +310,9 @@ def main(argv=None):
     o.add_argument("--label", required=True)
     o.add_argument("--window", type=float, default=30.0)
     o.set_defaults(fn=cmd_once)
+
+    h = sub.add_parser("health", help="one-shot health check (PTP/iptables/route/VF)")
+    h.set_defaults(fn=cmd_health)
 
     args = ap.parse_args(argv)
     return args.fn(Config(), args)

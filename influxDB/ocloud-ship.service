@@ -1,0 +1,15 @@
+[Unit]
+Description=O-Cloud telemetry InfluxDB shipper
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/ocloud-shipper.env
+WorkingDirectory=/root/ocloud-influx-shipper
+ExecStart=/usr/bin/python3 /root/ocloud-influx-shipper/influx-ship.py watch
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

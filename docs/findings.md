@@ -110,3 +110,27 @@ The IPC-rises-while-occupancy-stays-flat prediction now has its idle anchor.
 | D2 | **No host metrics log file.** gNB metrics go to pod stdout; `nof_ues` read via `kubectl logs`, or host log if METRICS_LOG is set. | `ls /mnt/debugging-logs/*.log` empty |
 | D3 | **gNB liveness = pod Running AND pgrep gnb.** Pod-alone reads Running during the O1-timeout restart loop. Disagreement = restart-loop signal; framework reports rather than mislabels. | classifier design |
 | D4 | **iperf is r-App-driven only.** Framework never generates traffic; detects iperf3 and labels C. Keeps the agent observational / RAN-agnostic. | design decision |
+
+## Detection correction (2026-07-18, cont.)
+
+| # | Finding | Evidence |
+|---|---|---|
+| D5 | **Workload on joule, orchestration on the KVM.** `kubectl` on joule sees no pod (`default` ns, wrong context); the same pod is `3/3 Running 30h` from the KVM. The gNB PROCESS runs on joule: `pgrep -ax gnb` → `212895 gnb -c /tmp/gnb-config.yml`, alongside o1_adapter and entrypoint scripts. | `pgrep -ax gnb` on joule; `kubectl get pod` on KVM |
+| D6 | **Liveness must be pgrep-primary.** kubectl absence on the workload node is normal, not a fault. Classifier rewritten: process = ground truth; pod phase only enriches and only STOPs on an *explicit* bad phase (Running-but-no-process, or process-but-Failed). | classifier v2, 7 tests |
+| D7 | **gNB tees stdout to a host file** (`<cwd>/<timestamp>/gnb.stdout`), so `nof_ues` is readable without kubectl. Classifier auto-discovers the newest `gnb.stdout`. | `pgrep -af` shows `tee -a ./20260717-120458/gnb.stdout` |
+
+## Metrics-log path (2026-07-18)
+
+| # | Finding |
+|---|---|
+| D8 | gNB stdout lives at `/var/rootdirs/mnt/debugging-logs/<timestamp>/gnb.stdout` (ostree prefixes `/var/rootdirs`). The `<timestamp>` dir is per-restart, so auto-discovery picks the NEWEST and requires it be modified within 2 min (`-mmin -2`) — 40+ stale files exist and must not drive classification. No config change needed: the existing `tee` is reused, no extra writer, no disk cost. |
+
+## Health heartbeat (2026-07-19)
+
+| # | Finding / decision |
+|---|---|
+| H1 | iptables backend is **nft** (`xtables-nft-multi`, `iptables-save v1.8.7`). `iptables-save` reads it fine. |
+| H2 | PTP health thresholds taken from operator's joule guide: master_offset <100ns, gmPresent true, gmIdentity=e8c57a.fffe.9053e9 (OcNOS GM), state SLAVE, PHC<->REALTIME <100ns. |
+| H3 | Health is **poll, not push**: agent exposes GET /health + a summary in /status; the r-App polls at its own cadence. Agent never needs the r-App address. Remember this when building the r-App. |
+| H4 | Health runs on a **120s timer, off the sample loop** -> ~0.03% of one housekeeping core, zero cost to energy measurement. Not a gate; never fails a capture. |
+| H5 | iptables/route use **baseline-on-first-run + report change** (N2/N3 not up yet, so "correct" ruleset unknown -- snapshot current, flag drift, refine later). |

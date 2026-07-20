@@ -30,6 +30,22 @@ one environment variable:
 |---|---|---|
 | `GNB_COMM` | `gnb` | `nr-softmodem` |
 
+## Node health (operator convenience, not measurement)
+
+A slow (120s) heartbeat so the r-App can show green/red without SSHing into the
+node. Polled, never pushed -- the agent exposes it, the r-App consumes it:
+
+```bash
+python3 -m agent.main health          # one-shot: PTP / iptables / route / VF
+curl localhost:5010/health            # when serving; r-App polls this
+```
+
+Watches (thresholds from the joule PTP guide): PTP master_offset <100ns +
+gmPresent + grandmaster identity, ptp4l/phc2sys alive, PHC<->REALTIME offset,
+iptables ruleset change vs first-run baseline (nft backend), ip route change,
+enp202s0f0 link + VF3 (spoof/link-state/trust/tx-drops). Cost ~40ms / 120s.
+Needs root for pmc + iptables; degrades to "unavailable" otherwise.
+
 ## What it captures
 
 | Source | Metric | Serves |
@@ -90,7 +106,7 @@ REDFISH_PASSWORD=... python3 tools/redfish_probe.py \
 
 ```
 agent/collectors/   cpuidle, procstat, rapl, threads, perf, redfish,
-                    topology, cpufreq, numa, uncore
+                    topology, cpufreq, numa, uncore, health
 agent/core/         sampler (measured windows), run (manifest)
 agent/sinks/        filesink (authoritative CSV)
 agent/api/          REST — the r-App drives this

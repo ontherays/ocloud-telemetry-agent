@@ -41,25 +41,52 @@ pod_name(){
     -o jsonpath='{.items[0].metadata.name}' 2>/dev/null
 }
 
-pod_running(){
-  local p="$1"; [ -z "$p" ] && return 1
-  local phase
-  phase=$(kubectl -n "$NS" get pod "$p" -o jsonpath='{.status.phase}' 2>/dev/null)
-  [ "$phase" = "Running" ]
+pod_phase(){
+  # Echoes the pod phase, or "" if kubectl can't reach the cluster / no pod.
+  # On joule, kubectl targets a different context than the KVM that manages the
+  # pod, so this is often "" even when the gNB runs here. That is NOT a fault --
+  # pgrep is the ground truth for liveness on the workload node.
+  command -v kubectl >/dev/null 2>&1 || { echo ""; return; }
+  local p; p=$(pod_name)
+  [ -z "$p" ] && { echo ""; return; }
+  kubectl -n "$NS" get pod "$p" -o jsonpath='{.status.phase}' 2>/dev/null
 }
 
 gnb_process_up(){
-  # pgrep sees the process only with hostPID or on the host running the gNB.
+  # Ground truth on the node running the workload. The DU binary is `gnb`
+  # (srsRAN), invoked as `gnb -c /tmp/gnb-config.yml` on joule.
   pgrep -x "$GNB_COMM" >/dev/null 2>&1 && return 0
-  pgrep -f "/$GNB_COMM" >/dev/null 2>&1 && return 0
+  pgrep -f "^$GNB_COMM -c" >/dev/null 2>&1 && return 0
+  pgrep -f "/$GNB_COMM " >/dev/null 2>&1 && return 0
   return 1
 }
 
-# nof_ues: host metrics log if present, else the latest kubectl log line.
+# nof_ues: host metrics log if present, else kubectl. The gNB tees stdout to a
+# host file under a per-RESTART timestamped dir, e.g.
+#   /var/rootdirs/mnt/debugging-logs/<YYYYMMDD-HHMMSS>/gnb.stdout
+# (ostree prefixes /var/rootdirs). The dir name changes each restart, so we must
+# pick the NEWEST gnb.stdout, not a hardcoded path. METRICS_LOG overrides.
+_discover_metrics_log(){
+  if [ -n "$METRICS_LOG" ]; then
+    [ -f "$METRICS_LOG" ] && echo "$METRICS_LOG"
+    return
+  fi
+  # newest gnb.stdout across the known roots (ostree /var/rootdirs first)
+  ls -t \
+    /var/rootdirs/mnt/debugging-logs/*/gnb.stdout \
+    /mnt/debugging-logs/*/gnb.stdout \
+    2>/dev/null | head -1
+}
+
 read_nof_ues(){
-  local line=""
-  if [ -n "$METRICS_LOG" ] && [ -f "$METRICS_LOG" ]; then
-    line=$(grep -o 'nof_ues=[0-9]*' "$METRICS_LOG" 2>/dev/null | tail -1)
+  local line="" f
+  f=$(_discover_metrics_log)
+  if [ -n "$f" ] && [ -f "$f" ]; then
+    # only trust a log that is actually current: modified in the last 120s.
+    # a stale file from an old restart must NOT drive classification.
+    if [ -n "$(find "$f" -mmin -2 2>/dev/null)" ]; then
+      line=$(grep -o 'nof_ues=[0-9]*' "$f" 2>/dev/null | tail -1)
+    fi
   fi
   if [ -z "$line" ] && command -v kubectl >/dev/null 2>&1; then
     local p; p=$(pod_name)
@@ -77,20 +104,30 @@ iperf_running(){
 
 # --- classifier ------------------------------------------------------------
 # echoes: "<label>|<note>"  or  "STOP|<reason>"
+#
+# Liveness = the gNB PROCESS (pgrep). This is ground truth on the node running
+# the workload, and is RAN-agnostic (OAI bare-metal has no pod either). The pod
+# phase only ENRICHES: it can flag an explicit fault, but its absence (kubectl
+# unreachable from this host) never overrides pgrep.
 classify(){
-  local pod pods_run proc ues
-  pod=$(pod_name)
-  pods_run=1; pod_running "$pod" || pods_run=0
-  proc=1;     gnb_process_up   || proc=0
+  local proc phase ues
+  proc=1; gnb_process_up || proc=0
+  phase=$(pod_phase)      # "" if kubectl unreachable / no pod (normal on joule)
 
-  # gNB DOWN: neither pod nor process
-  if [ "$pods_run" -eq 0 ] && [ "$proc" -eq 0 ]; then
-    echo "A-idle-no-gnb|no pod, no process"; return
+  # gNB DOWN: no process.
+  if [ "$proc" -eq 0 ]; then
+    # If kubectl explicitly reports the pod Running while no process exists,
+    # THAT is the real restart-loop / wrong-node signal worth stopping on.
+    if [ "$phase" = "Running" ]; then
+      echo "STOP|pod phase=Running but no gnb process here (wrong node, or O1-timeout restart loop)"
+      return
+    fi
+    echo "A-idle-no-gnb|no gnb process (pod phase='${phase:-unknown}')"; return
   fi
 
-  # DISAGREEMENT: pod Running but no gnb process (or vice versa) = restart loop
-  if [ "$pods_run" -ne "$proc" ]; then
-    echo "STOP|pod_running=$pods_run but gnb_process=$proc (restart loop / O1 timeout?) - not labelling"
+  # gNB process IS up. A non-Running explicit phase is a genuine anomaly.
+  if [ -n "$phase" ] && [ "$phase" != "Running" ]; then
+    echo "STOP|gnb process up but pod phase=$phase (anomalous) - not labelling"
     return
   fi
 

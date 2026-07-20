@@ -32,6 +32,8 @@ class Config:
         self.enable_cpufreq = _b("ENABLE_CPUFREQ", True)
         self.enable_numa = _b("ENABLE_NUMA", True)
         self.enable_uncore = _b("ENABLE_UNCORE", True)
+        self.enable_health = _b("ENABLE_HEALTH", True)
+        self.health_interval = _f("HEALTH_INTERVAL", 120.0)
         self.uncore_window = _f("UNCORE_WINDOW", 1.0)
         self.uncore_probe = _b("UNCORE_PROBE", False)  # UPI/AVX512, off by default
         # PCI addrs whose NUMA node to track (fronthaul VF).

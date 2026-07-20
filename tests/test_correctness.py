@@ -182,10 +182,85 @@ def test_membw_per_node():
     check("c6 residency 0", r["cstate"]["c6_residency"] == 0.0)
 
 
+def test_health_parsing():
+    print("\nhealth: pmc + VF parsing + drift (real joule formats)")
+    from agent.collectors.health import HealthCollector
+    import agent.collectors.health as H
+
+    h = HealthCollector(gm_identity="e8c57a.fffe.9053e9")
+
+    # --- pmc parse (from the joule PTP guide "healthy" snippet) ---
+    pmc_out = ("b49691.fffe.cf0a80-0 seq 0 RESPONSE MANAGEMENT TIME_STATUS_NP\n"
+               "\tmaster_offset              1\n"
+               "\tingress_time               1776252134391273179\n"
+               "\tgmPresent                  true\n"
+               "\tgmIdentity                 e8c57a.fffe.9053e9\n")
+    real_sh, real_which, real_root = H._sh, H.shutil.which, H._is_root
+    H._sh = lambda cmd, timeout=6: (0, pmc_out, "") if cmd[0] == "pmc" else (0, "", "")
+    H.shutil.which = lambda x: "/usr/bin/" + x
+    H._is_root = lambda: True
+    try:
+        p = h._ptp()
+    finally:
+        H._sh, H.shutil.which, H._is_root = real_sh, real_which, real_root
+    check("master_offset parsed", p["master_offset_ns"] == 1)
+    check("gm_present true", p["gm_present"] is True)
+    check("sync_ok (offset<100, gm present, id match)", p["sync_ok"] is True)
+
+    # offset over threshold -> not ok
+    bad = pmc_out.replace("master_offset              1",
+                          "master_offset              350")
+    H._sh = lambda cmd, timeout=6: (0, bad, "") if cmd[0] == "pmc" else (0, "", "")
+    H.shutil.which = lambda x: "/usr/bin/" + x
+    H._is_root = lambda: True
+    try:
+        p2 = h._ptp()
+    finally:
+        H._sh, H.shutil.which, H._is_root = real_sh, real_which, real_root
+    check("offset 350ns -> sync not ok", p2["sync_ok"] is False)
+
+    # --- VF parse (from the user's ip -s link snippet) ---
+    ip_out = (
+        "5: enp202s0f0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 9000\n"
+        "    vf 3     link/ether 00:11:22:33:44:55 brd ff:ff:ff:ff:ff:ff, "
+        "spoof checking off, link-state auto, trust on\n"
+        "    RX: bytes  packets\n"
+        "    349529532565    64607641\n"
+        "    TX: bytes  packets  dropped\n"
+        "    20241255227074    2833347437    0\n")
+    real_sh2 = H._sh
+    H._sh = lambda cmd, timeout=6: (0, ip_out, "")
+    real_rt = H.read_text
+    H.read_text = lambda p: "up" if "operstate" in p else None
+    try:
+        nic = h._nic_vf()
+    finally:
+        H._sh = real_sh2
+        H.read_text = real_rt
+    check("VF spoof off detected", nic["spoof_off"] is True)
+    check("VF link-state auto", nic["link_state"] == "auto")
+    check("VF trust on", nic["trust_on"] is True)
+    check("VF tx_dropped=0", nic["tx_dropped"] == 0)
+
+    # --- drift: first run captures baseline, no false alarm ---
+    h2 = HealthCollector()
+    real_sh3 = H._sh
+    H._sh = lambda cmd, timeout=6: (1, "", "not root")   # iptables unavailable
+    H.read_text = lambda p: "0\n" if "route" in p else None
+    try:
+        r1 = h2.check(force=True)
+        r2 = h2.check(force=True)
+    finally:
+        H._sh = real_sh3
+        H.read_text = real_rt
+    check("first run captures baseline", r1["drift"]["baseline_captured"] is True)
+    check("second run no false route drift", r2["drift"]["route_changed"] is False)
+
 if __name__ == "__main__":
     for fn in (test_stale_guard, test_all_idle_states_count, test_rapl_wrap,
                test_rapl_keyed_by_dir, test_parse_stat, test_cpuset,
-               test_membw_per_node):
+               test_membw_per_node,
+               test_health_parsing):
         fn()
     print("\n%s" % ("-" * 52))
     if FAIL:

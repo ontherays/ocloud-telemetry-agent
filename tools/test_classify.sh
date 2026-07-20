@@ -1,44 +1,43 @@
 #!/bin/bash
 set -u
-# stub the agent + sudo so nothing real runs
 AGENT="true"; WINDOW=1
-
-# import just the classifier + helpers from the script (skip the main case block)
 source <(sed '/^# --- main/,$d' "$(dirname "$0")/run_campaign.sh")
 
 pass=0; fail=0
-expect(){ # $1=expected label  $2=actual "label|note"
-  local got="${2%%|*}"
-  if [ "$got" = "$1" ]; then echo "  PASS  $1  ($2)"; pass=$((pass+1))
-  else echo "  FAIL  expected $1 got $got  ($2)"; fail=$((fail+1)); fi
-}
+expect(){ local got="${2%%|*}"
+  if [ "$got" = "$1" ]; then echo "  PASS  $1"; pass=$((pass+1))
+  else echo "  FAIL  expected $1 got $got  ($2)"; fail=$((fail+1)); fi; }
 
-echo "State A: gNB down"
-pod_name(){ echo ""; }; pod_running(){ return 1; }; gnb_process_up(){ return 1; }
-iperf_running(){ return 1; }; read_nof_ues(){ echo ""; }
+# Liveness is pgrep (gnb_process_up); pod_phase only enriches.
+
+echo "A: no process, kubectl unreachable (normal on joule)"
+gnb_process_up(){ return 1; }; pod_phase(){ echo ""; }
+iperf_running(){ return 1; }; read_nof_ues(){ echo "0"; }
 expect "A-idle-no-gnb" "$(classify)"
 
-echo "STOP: pod running, process absent (restart loop)"
-pod_name(){ echo "pod-x"; }; pod_running(){ return 0; }; gnb_process_up(){ return 1; }
+echo "STOP: no process but pod explicitly Running (wrong node / restart loop)"
+gnb_process_up(){ return 1; }; pod_phase(){ echo "Running"; }
 expect "STOP" "$(classify)"
 
-echo "State C: gNB up + iperf running"
-pod_name(){ echo "pod-x"; }; pod_running(){ return 0; }; gnb_process_up(){ return 0; }
+echo "C: process up + iperf running (kubectl unreachable)"
+gnb_process_up(){ return 0; }; pod_phase(){ echo ""; }
 iperf_running(){ return 0; }; read_nof_ues(){ echo "1"; }
 expect "C-iperf" "$(classify)"
 
-echo "State B: gNB up, no iperf, nof_ues=0"
+echo "B: process up, no iperf, nof_ues=0"
 iperf_running(){ return 1; }; read_nof_ues(){ echo "0"; }
 expect "B-gnb-idle" "$(classify)"
 
-echo "State B-ue: gNB up, no iperf, nof_ues=3"
+echo "B-ue: process up, no iperf, nof_ues=3"
 read_nof_ues(){ echo "3"; }
 expect "B-ue-gnb-attached" "$(classify)"
 
-echo "State B (ues unknown): metrics source unreachable"
-read_nof_ues(){ echo ""; }
+echo "STOP: process up but pod phase=Failed (anomaly)"
+read_nof_ues(){ echo "0"; }; pod_phase(){ echo "Failed"; }
+expect "STOP" "$(classify)"
+
+echo "B: process up, kubectl unreachable, ues unknown"
+pod_phase(){ echo ""; }; read_nof_ues(){ echo ""; }
 expect "B-gnb-idle" "$(classify)"
 
-echo
-echo "pass=$pass fail=$fail"
-[ "$fail" -eq 0 ]
+echo; echo "pass=$pass fail=$fail"; [ "$fail" -eq 0 ]

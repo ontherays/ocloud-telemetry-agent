@@ -45,6 +45,12 @@ def serve(agent, cfg):
         except RuntimeError as e:
             return jsonify(error=str(e)), 409
 
+    @app.get("/health")
+    def health():
+        if not agent.health:
+            return jsonify(error="health collector disabled"), 404
+        return jsonify(agent.health.check())
+
     @app.get("/snapshot")
     def snapshot():
         from ..core.sampler import Sampler
