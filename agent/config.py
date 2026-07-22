@@ -25,7 +25,7 @@ class Config:
         # Rendered config the gNB actually ran. Archived per run: two joule
         # deployments differed by 10 W and only the config explained it.
         self.gnb_config_path = os.environ.get(
-            "GNB_CONFIG_PATH", "/mnt/debugging-logs/gnb-config.yml")
+            "GNB_CONFIG_PATH", "/mnt/gnb-runtime/gnb-config.yml")
         self.enable_perf = _b("ENABLE_PERF", True)
         self.perf_window = _f("PERF_WINDOW", 1.0)
         self.enable_threads = _b("ENABLE_THREADS", True)
