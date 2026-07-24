@@ -1,179 +1,225 @@
-# O-Cloud Telemetry — Findings & Results
+# O-Cloud Energy Measurement — Findings
 
-**Testbed:** joule (StarlingX RT worker, dual Xeon; gNB on socket 1 = package-1,
-control on socket 0 = package-0). OCUDU 2026.04 Split 7.2x.
-**Radio for this result set:** TM500 emulator, 2×2 (nof_antennas_dl/ul = 2),
-RU MAC `10:70:fd:14:1c:10` — confirmed identical across the B/C/D ladder via
-per-run `gnb-config.yml` archiving.
-**Instrument:** ocloud-telemetry-agent (RAPL + PMU + cpuidle + Redfish).
-**Pipeline:** joule captures → Galileo ships → InfluxDB (`infra-telemetry`).
-
-> All package-1 values are the mean of the RAPL `watts` field over a 30 s window.
-> package-0 is the untouched control socket. Every condition is a distinct,
-> verified state on the **same TM500 gNB config** — not mixed radios.
+**Note on this report.** Section 1 describes how the data was collected and why
+the capture method changed part-way through the campaign. Sections 2–4 present
+the verified dataset and its analysis. **Section 5 corrects an earlier finding
+that did not survive controlled re-measurement** — recorded deliberately rather
+than quietly dropped.
 
 ---
 
-## 1. The energy ladder (TM500 2×2, single config)
+## 1. Method
 
-| Condition | State | package-1 (W) | Δ prev | Isolates |
-|---|---|---|---|---|
-| **A** | no gNB | **66.33** | — | platform floor |
-| **B** | gNB up, no UE | **76.83** | **+10.5** | DU static (software) cost |
-| **C** | UE attached, no traffic | **86.68** | **+9.9** | UE attach / radio-link cost |
-| **D** | UE + iperf ~100 Mbps | **89.78** | **+3.1** | user-traffic cost |
-| | | | **+23.4** | total A → D |
+### 1.1 Testbed
 
-Per-run values (reproducibility):
+| Item | Value |
+|---|---|
+| Node | joule — StarlingX RT worker, dual Xeon |
+| DU socket | socket 1 → RAPL domain **package-1** |
+| Control socket | socket 0 → RAPL domain **package-0** (no workload) |
+| Instrument | `ocloud-telemetry-agent` — RAPL energy, PMU (IPC/MPKI, memory BW), cpuidle occupancy, per-thread CPU, Redfish chassis power |
+| Stacks compared | **OCUDU 2026.04** (srsRAN-derived, Split 7.2x) and **OAI** (`nr-softmodem`) |
+| Data pipeline | joule captures → Galileo ships → InfluxDB bucket `infra-telemetry` → Grafana / rApp |
 
-| Condition | runs | package-1 (W) |
+**Collector availability differs by stack.** OAI runs are captured with the PMU
+collectors disabled (see F7), so OAI has **no** `ocloud_perf` (IPC/MPKI) or
+`ocloud_membw` data. Energy and occupancy — the quantities this report depends
+on — are unaffected.
+
+### 1.2 Controlled conditions
+
+Energy is measured under four states. Each changes exactly one thing, so the
+*differences* isolate individual costs:
+
+| Condition | State | The difference isolates |
 |---|---|---|
-| A | 4 | 66.33, 66.36, 66.36, 66.32 |
-| B | 3 | 76.86, 76.79, 76.85 |
-| C | 2 | 86.70, 86.66 |
-| D | 4 | 90.20, 89.78, 89.60, 89.55 |
+| A | no gNB running | platform floor |
+| B | gNB up, no UE | DU static cost = B − A |
+| C | gNB up, UE attached, **no traffic** | UE attach cost = C − B |
+| D | gNB up, UE + iperf at rate R | traffic cost = D − C |
 
-Each condition's repeats agree to ~0.1 W; the four conditions are cleanly
-separated. Distinct conditions producing distinct, repeatable energy is the
-evidence the instrument measures live state (no staleness/duplication).
+A single "measure whatever is running" reading cannot produce any of these
+quantities; only the controlled differences can.
+
+### 1.3 Why the method changed
+
+Earlier capture rounds produced inconsistent results. Root causes, all
+identified:
+
+1. **Labels were free text.** The agent cannot observe the iperf rate (traffic
+   is generated on a different host) nor which gNB stack is running (only the
+   process name it is told to look for). One batch labelled `D-oai-iperf-100M`
+   was in fact OCUDU at 200 Mbps.
+2. **Configuration changed between conditions.** Different radios (TM500 2×2 vs
+   Pegatron 4×4), different core pinning, and different log levels appeared
+   within what was recorded as a single ladder.
+3. **Traffic timing was open-loop.** iperf was started separately from the
+   captures, so some 30 s windows did not overlap live traffic.
+
+**Fix — all captures in this report use `capture.sh`**, which verifies the
+system state *before* capturing and refuses to proceed on a mismatch:
+
+- the other stack running → abort (prevents mixing OCUDU and OAI)
+- condition A with a gNB process present → abort
+- conditions B/C/D with no gNB process → abort
+- B/C with iperf running locally → abort
+- C/D → explicit operator confirmation of UE attachment / live traffic
+
+It also sets the correct environment per stack automatically and takes **3 runs
+per condition**, reporting each run and the group mean.
+
+### 1.4 How values are computed
+
+Two levels of averaging:
+
+1. **Within a run** — mean of all RAPL samples in that run's `power.csv`.
+2. **Across runs** — mean of the three per-run means.
+
+Verified by test case: samples of 70 / 80 / 90 W return 80.00, not 90.00 — i.e.
+every sample is read, not only the last.
 
 ---
 
-## 2. Control socket validates the deltas
+## 2. Results — verified dataset (2026-07-24)
 
-package-0 (socket 0, no workload) stays flat at **~64 W across every condition**.
-Because the control socket does not move while package-1 climbs 66 → 90 W, the
-rise is attributable to the DU on socket 1, not to system-wide drift. This is
-what makes the per-step deltas causal rather than coincidental.
+All values are package-1 (DU socket) watts. `pkg0` is the control socket.
 
----
+### 2.1 OAI
 
-## 3. Headline findings
+| Condition | run 1 | run 2 | run 3 | **mean** | spread | pkg0 |
+|---|---|---|---|---|---|---|
+| A — no gNB | 66.36 | 66.36 | 66.35 | **66.36** | 0.01 | 64.24 |
+| B — gNB, no UE | 78.48 | 78.51 | 78.60 | **78.53** | 0.12 | 64.30 |
+| C — UE attached | 78.67 | 78.65 | 78.64 | **78.65** | 0.03 | 64.20 |
+| D — iperf 100 | 80.08 | 80.13 | 80.11 | **80.11** | 0.05 | 64.37 |
 
-**F1 — Attaching a UE costs almost as much as running the DU.**
-C − B = **+9.9 W** for a UE that is attached and synchronized but passing **zero
-traffic**. Maintaining the radio link (timing, control channels, sync) for one
-idle-attached UE costs nearly as much (+9.9 W) as the entire DU static cost
-(+10.5 W). This is non-obvious: an "idle" attached UE is not free.
+### 2.2 OCUDU
 
-**F2 — User traffic is comparatively cheap.**
-D − C = **+3.1 W** to carry ~100 Mbps on top of an attached UE. The large energy
-step is *attaching* (B→C, +9.9 W); moving user bytes adds little (C→D, +3.1 W).
-The DU's energy is dominated by **radio maintenance**, not user-plane throughput.
+| Condition | run 1 | run 2 | run 3 | **mean** | spread | pkg0 |
+|---|---|---|---|---|---|---|
+| A — no gNB | *(shared platform floor)* | | | **66.36** | — | — |
+| B — gNB, no UE | 86.76 | 86.82 | 86.66 | **86.75** | 0.16 | 64.16 |
+| C — UE attached | 87.04 | 87.09 | 87.04 | **87.06** | 0.05 | 64.26 |
+| D — iperf 100M | 90.36 | 90.40 | 88.66 | **89.81** | **1.74** ⚠ | 64.37 |
+| D — iperf 200M | 91.39 | 91.41 | 91.36 | **91.39** | 0.05 | 64.49 |
 
-**F3 — Energy is barely sensitive to offered load in this range.**
-iperf at 50 Mbps and 100 Mbps produced essentially the same package-1 power
-(all D runs 89.5–90.2 W, ~0.5 W spread). Doubling offered load did not
-meaningfully change energy — consistent with F2 (traffic is cheap relative to
-the always-on radio cost).
+⚠ The 100M spread is an order of magnitude larger than every other condition —
+see  6.1.
 
-**F4 — Occupancy does not track this energy (the thesis point).**
-Under 100 Mbps load the isolated DU cores read ~12–23 % scheduler-visible
-occupancy while the socket draws +23 W over the platform floor. An estimator
-that assumes power ∝ CPU-time (3GPP TS 28.554 §6.7.3.1.4; O-RAN O-Cloud-ES)
-would badly under-read — most sharply for the +9.9 W attach cost, which barely
-moves CPU occupancy at all. **Energy is the faithful signal; occupancy is not.**
+### 2.3 Control-socket validation
+
+pkg0 stayed within **64.07 – 64.50 W** across all 21 runs — a total range of
+0.43 W while pkg1 moved over 25 W. The rise on package-1 is therefore
+attributable to the DU on socket 1, not to system-wide drift.
 
 ---
 
-## 4. Supporting measurements (from run files)
+## 3. Analysis — derived costs
 
-| Metric | Value (gNB up) | Note |
+### 3.1 OAI
+
+| Step | Δ (W) | Interpretation |
 |---|---|---|
-| delivered freq ratio | ~1.476, steady | no throttling; stable across A–D |
-| C6 residency | 0 | DU cores never deep-sleep (hardware-confirmed) |
-| C1 residency | high | cores park in C1, not C6 |
-| IPC (idle baseline) | ~0.61 | expected to rise under load — to verify in sweep |
-| mem BW socket 1 | ~294 R / 226 W MiB | the DU socket; socket 0 much lower |
+| A → B | **+12.17** | DU static cost |
+| B → C | **+0.12** | UE attach — *within run-to-run spread* |
+| C → D | **+1.45** | 100 Mbps traffic |
+| **A → D** | **+13.75** | total to serve one UE at 100 Mbps |
 
----
+### 3.2 OCUDU
 
-## 5. Provenance note — why the earlier "contradiction" was not an error
+| Step | Δ (W) | Interpretation |
+|---|---|---|
+| A → B | **+20.39** | DU static cost |
+| B → C | **+0.31** | UE attach — *within run-to-run spread* |
+| C → D100 | **+2.75** | first 100 Mbps |
+| D100 → D200 | **+1.58** | second 100 Mbps |
+| **A → D200** | **+25.03** | total at 200 Mbps |
 
-An earlier B reading of ~87 W (vs 76.8 W here) was traced, via the archived
-per-run `gnb-config.yml`, to a **different radio/config** (Pegatron 4×4, debug
-logging, cores unpinned `@(0-31)`) — not a measurement fault. The TM500 ladder
-above uses one consistent config (2×2, `all_level` low, pinned cores). Lesson:
-**idle DU energy is configuration-dependent**; per-run config archiving is what
-makes cross-run numbers interpretable rather than contradictory.
+### 3.3 Side by side
 
----
-
-## 6. Data-quality caveats (honest scope)
-
-1. **iperf rate labels.** Some D runs were captured during 50 Mbps vs 100 Mbps
-   iperf but all labelled `100mbps`. Energy was ~equal either way (F3), so the
-   ladder is unaffected, but rate labels should be corrected for the formal
-   sweep table.
-2. **Open-loop capture timing.** iperf and captures were started separately;
-   most D captures overlapped live traffic (confirmed by the +3 W over C), but a
-   synchronized long-iperf + back-to-back-captures method is preferred for the
-   formal sweep so every window provably has traffic.
-3. **Sweep not yet complete.** Only ~50–100 Mbps measured. A full 100 → 1000 Mbps
-   sweep is needed to characterise energy-vs-load as a curve (expected to stay
-   fairly flat, per F3).
-4. **A-run flood.** ~1600 idle A captures exist from earlier continuous `--watch`
-   — excellent A statistics, but the InfluxDB bucket needs cleanup so deliberate
-   captures aren't buried.
-
----
-
-## 7. What's proven vs pending
-
-**Proven (TM500 2×2, one config):**
-- A = 66.3, B = 76.8, C = 86.7, D = 89.8 W — clean, repeatable, separated ladder.
-- DU static cost **+10.5 W**; UE attach cost **+9.9 W**; 100 Mbps traffic **+3.1 W**.
-- Control socket flat → deltas are causal (the DU), not noise.
-- Instrument measures live state (distinct conditions → distinct energy).
-- Full pipeline capture → ship → InfluxDB, values faithful.
-
-**Pending:**
-- Rate sweep 100 → 1000 Mbps with correct labels + synchronized capture.
-- IPC-vs-load (does compute-per-cycle rise while occupancy stays flat?).
-- Clean B on other radios (Pegatron 4×4) for a cross-radio comparison.
-- Fix agent default `GNB_CONFIG_PATH` (`/mnt/gnb_runtime` → `/mnt/gnb-runtime`).
-
----
-
-## 8. Headline numbers (abstract / slides)
-
-```
-Platform floor (no gNB)              66.3 W
-+ DU running (no UE)        +10.5 W → 76.8 W
-+ UE attached (no traffic) + 9.9 W → 86.7 W   ← attaching costs ~as much as the DU
-+ ~100 Mbps traffic        + 3.1 W → 89.8 W   ← user traffic is cheap
-Control socket (all cond.)   ~64 W flat       ← validates the deltas
-DU-core occupancy under load ~12-23 %         ← energy says otherwise
-```
-
-*On a TM500 2×2 Split 7.2x O-DU, attaching an idle UE costs ~9.9 W — nearly the
-DU's own static cost — while 100 Mbps of traffic adds only ~3 W. The DU's energy
-is dominated by radio maintenance, not throughput, and none of it tracks
-scheduler-visible CPU occupancy.*
-
----
-
-# PART II — CROSS-STACK: OAI gNB (same node, same method)
-
-**Radio/stack:** OAI `nr-softmodem` (OAI gNB), launched with
-`--telnetsrv.shrmod o1`, DU on socket 1 (same isolated odd cores as OCUDU).
-Measured with **perf/uncore collectors disabled** — see F5 below. RAPL energy
-and cpuidle occupancy are unaffected.
-
-## 9. OAI energy — B (gNB up, no UE)
-
-| Metric | OAI | OCUDU (srsRAN) | Δ |
+| Cost component | OAI | OCUDU | ratio |
 |---|---|---|---|
-| package-1 (gNB idle) | **78.49 W** | 76.83 W | **+1.7 W** |
-| package-0 control | ~64.2 W flat | ~64.3 W flat | — |
+| DU static (A→B) | 12.17 W | 20.39 W | OCUDU **1.7×** |
+| UE attach (B→C) | 0.12 W | 0.31 W | both ≈ 0 |
+| First 100 Mbps | 1.45 W | 2.75 W | OCUDU 1.9× |
+| **Total to serve 100 Mbps** | **13.75 W** | **23.45 W** | OCUDU **1.7×** |
 
-Five OAI runs: 78.46, 78.46, 78.52, 78.44, 78.56 W — stable to 0.1 W. OAI idles
-~1.7 W higher than OCUDU; plausibly attributable in part to OAI's continuous
-self-monitoring (F5).
+---
 
-## 10. Occupancy signature — the key cross-stack contrast
+## 4. Findings
 
-At **idle** (gNB up, no UE, no traffic), OAI's isolated DU cores read:
+### F1 — The DU's static cost dominates everything else
+
+Simply *running* the DU, with no UE and no traffic, accounts for the
+overwhelming majority of energy above the platform floor:
+
+- **OAI:** 12.17 of 13.75 W = **88 %**
+- **OCUDU:** 20.39 of 23.45 W = **87 %**
+
+Attaching a UE and carrying 100 Mbps together add only ~12 %. The DU is
+essentially an always-on cost.
+
+### F2 — Attaching a UE is energetically free (both stacks)
+
+B → C is **+0.12 W (OAI)** and **+0.31 W (OCUDU)**. Both are comparable to the
+run-to-run spread *within* a single condition (0.01–0.16 W), so neither is a
+confidently non-zero effect.
+
+This is mechanistically consistent: the DU transmits the full downlink frame
+structure — synchronisation signals, reference signals, control channels —
+whether or not a UE is attached. One idle UE changes almost nothing about what
+the radio is already doing.
+
+### F3 — Traffic is cheap, and gets cheaper
+
+OCUDU load response:
+
+| offered load | pkg1 (W) | marginal Δ | W per 100 Mbps |
+|---|---|---|---|
+| 0 (attached) | 87.06 | — | — |
+| 100 Mbps | 89.81 | +2.75 | 2.75 |
+| 200 Mbps | 91.39 | +1.58 | 1.58 |
+
+The second 100 Mbps costs **43 % less** than the first. Energy-vs-load is
+**sub-linear and flattening**, consistent with F1: the fixed radio cost
+dominates and marginal energy per bit falls as load rises.
+
+### F4 — OAI serves the same load for ~40 % less energy
+
+OAI delivers 100 Mbps to one UE for **+13.75 W** over the platform floor;
+OCUDU needs **+23.45 W** — **1.7×** as much for the same service. The gap
+originates almost entirely in the **static** cost (12.17 vs 20.39 W), not in
+traffic handling.
+
+*Caveat:* the two stacks were not configured identically ( 6.2). This compares
+two working deployments, not two identically-tuned ones.
+
+### F5 — Energy efficiency is strongly load-dependent
+
+Expressed in the 3GPP TS 28.554  6.7 EE-KPI form (throughput ÷ incremental
+power over the platform floor):
+
+| Stack | load | incremental W | Mbit/s per W |
+|---|---|---|---|
+| OAI | 100 Mbps | 13.75 | **7.3** |
+| OCUDU | 100 Mbps | 23.45 | **4.3** |
+| OCUDU | 200 Mbps | 25.03 | **8.0** |
+
+Two observations: OAI is ~1.7× more efficient at 100 Mbps, and **OCUDU's
+efficiency nearly doubles when load doubles** (4.3 → 8.0 Mbit/s/W) because the
+fixed cost is amortised over more traffic. A DU at low utilisation is very
+inefficient per bit.
+
+### F6 — CPU occupancy does not track energy, and fails differently per stack
+
+Measured occupancy on the isolated DU cores at idle (condition B):
+
+| Stack | occupancy | behaviour |
+|---|---|---|
+| OCUDU | ~0 % (cores park in C1) | timer-driven; occupancy **under**-reads |
+| OAI | **cpu13 / cpu15 = 100 %** | DPDK busy-poll; occupancy **over**-reads |
+
+OAI's per-thread breakdown at idle (condition B, no UE, no traffic):
 
 | Core | OAI thread | busy % |
 |---|---|---|
@@ -182,160 +228,200 @@ At **idle** (gNB up, no UE, no traffic), OAI's isolated DU cores read:
 | cpu5 | `L1_tx_thread` | ~14–15 % |
 | cpu3 | `L1_rx_thread` | ~6 % |
 | cpu7 | `ru_thread` | ~2–3 % |
-| cpu9,11,17–31 | (idle) | ~0 % |
+| cpu9, 11, 17–31 | (idle) | ~0 % |
 
-**OAI pins two fronthaul threads that busy-poll at a full 100 % even with no UE
-and no traffic.** This is DPDK busy-poll in its purest form: two cores spin at
-100 % continuously, independent of load.
+Two fronthaul threads busy-poll at a full 100 % with nothing attached and no
+traffic — DPDK busy-poll in its purest form: two cores spinning continuously,
+independent of load.
 
-## 11. Headline cross-stack finding — occupancy fails in BOTH directions
+An estimator assuming power ∝ CPU-time (3GPP TS 28.554  6.7.3.1.4; O-RAN
+O-Cloud-ES) fails on **both** stacks, in opposite directions:
 
-| | OCUDU (srsRAN) | OAI |
-|---|---|---|
-| DU-core occupancy at idle | ~0 % (timer-driven, cores park in C1) | **cpu13/15 = 100 %** (busy-poll) |
-| idle energy (B) | 76.8 W | 78.5 W |
-| occupancy error mode | **under**-reads (0 % but draws 77 W) | **over**-reads (100 % but doing nothing) |
+- **OCUDU:** sees ~0 % → predicts "idle, cheap" → actually 86.75 W.
+- **OAI:** sees 100 % on two cores → predicts "fully loaded" → actually idle.
 
-An energy/load estimator based on scheduler-visible CPU occupancy fails on both
-stacks, in opposite directions:
+Neither reflects real work. **Scheduler-visible CPU occupancy is not a valid
+energy or load proxy for a poll-mode Split 7.2x O-DU, and the direction of its
+error is implementation-dependent.** RAPL energy is the faithful signal for both.
 
-- **OCUDU:** occupancy ~0 % → estimator says "idle, low power" → wrong, it's 77 W.
-- **OAI:** occupancy 100 % on two cores → estimator says "loaded, high power" →
-  wrong, it's idle (no UE, no traffic).
+### F7 — OAI monopolises the PMU (interoperability finding)
 
-**Neither stack's occupancy reflects actual work or energy.** It is pinned high
-(OAI) or low (OCUDU) by the polling architecture, independent of load. This is
-the thesis result, demonstrated with two contrasting implementations: **CPU
-occupancy is not a valid energy or load proxy for a poll-mode Split 7.2x O-DU,
-and the direction of its error is implementation-dependent.** Energy (RAPL) is
-the faithful signal for both.
+OAI's O1 telemetry (launched with `--telnetsrv.shrmod o1`) **continuously spawns
+`perf stat -e instructions -C 3,5,7,…,31`** against the isolated DU cores. These
+processes can get stuck: 3–6 zombie `perf` processes were observed, and they
+respawn after being killed.
 
-## 12. F5 — OAI monopolizes the PMU (interoperability finding)
+Consequences:
 
-OAI's O1 telemetry (`--telnetsrv.shrmod o1`) **continuously spawns
-`perf stat -e instructions -C 3,5,7,…,31`** on the DU cores, and these processes
-can get stuck (observed: 3–6 zombie perf processes that respawn after being
-killed). Consequences:
-
-- OAI uses hardware performance counters for its own monitoring; **OCUDU/srsRAN
-  does not.**
-- This **contends with external PMU-based measurement**: the agent's `perf` and
-  `uncore` collectors hang on OAI and must be disabled (`ENABLE_PERF=false
-  ENABLE_UNCORE=false`).
-- Energy (RAPL) and occupancy (cpuidle) measurement is **unaffected** — the A/B/C/D
-  energy ladder is fully measurable on OAI.
-- OAI's continuous self-monitoring is itself an energy cost captured in its
-  package-1 reading (consistent with OAI's +1.7 W over OCUDU at idle).
+- OAI uses hardware performance counters for its own monitoring; **OCUDU does
+  not.**
+- This **contends with external PMU-based measurement**. The agent's `perf` and
+  `uncore` collectors hang during their availability check and must be disabled
+  (`ENABLE_PERF=false ENABLE_UNCORE=false`) for every OAI capture.
+- Energy (RAPL) and occupancy (cpuidle) are **unaffected**, so the full A/B/C/D
+  ladder remains measurable on OAI — but IPC, MPKI and memory bandwidth are not.
+- OAI's continuous self-monitoring is itself an energy cost, included in its
+  package-1 reading.
 
 This is a concrete **interoperability limitation**: PMU-based O-Cloud telemetry
-cannot coexist with OAI's perf-based O1 monitoring without contention. Worth
-noting for any deployment intending to measure OAI via hardware counters.
+cannot coexist with OAI's perf-based O1 monitoring without contention. It should
+be noted by any deployment intending to measure OAI via hardware counters.
 
-## 13. Complete OAI ladder (2026-07-23 session, 3 runs per condition)
+### F8 — Supporting hardware measurements (OCUDU, gNB up)
 
-| Condition | package-1 runs (W) | mean | Δ prev |
-|---|---|---|---|
-| **A** no gNB | 66.35, 66.35, 66.36 | **66.36** | — |
-| **B** OAI up, no UE | 77.85, 78.04, 78.17 | **78.02** | **+11.7** |
-| **C** UE attached, no traffic | 77.78, 77.81, 77.85 | **77.81** | **−0.2** |
-| **D** UE + iperf 100 Mbps | 79.69, 79.76, 79.76 | **79.74** | **+1.9** |
-| | | | **+13.4 total** |
+| Metric | Value | Note |
+|---|---|---|
+| delivered frequency ratio | ~1.476, steady | no throttling; stable across A–D |
+| C6 residency | **0** | DU cores never enter deep sleep (hardware-confirmed) |
+| C1 residency | high | cores park in C1, not C6 |
+| IPC (idle baseline) | ~0.61 | expected to rise under load — to verify in the sweep |
+| memory BW, socket 1 | ~294 R / 226 W MiB/s | the DU socket; socket 0 much lower |
 
-package-0 control flat at 64.1–64.4 W in every condition. ✓
-
-## 14. Cross-stack comparison — OCUDU vs OAI
-
-| Condition | OCUDU (srsRAN) | OAI | difference |
-|---|---|---|---|
-| A — no gNB | 66.33 W | 66.36 W | shared floor ✓ |
-| B — gNB idle | 76.83 W (**+10.5**) | 78.02 W (**+11.7**) | OAI idles +1.2 W higher |
-| C — UE attached | 86.68 W (**+9.9**) | 77.81 W (**−0.2**) | **OCUDU +9.9 W vs OAI ~0 W** |
-| D — +100 Mbps | 89.78 W (**+3.1**) | 79.74 W (**+1.9**) | traffic cheap on both |
-| **Total A→D** | **+23.4 W** | **+13.4 W** | **OAI serves a UE for ~10 W less** |
-
-### F6 — UE attachment cost is implementation-dependent, and the gap is large
-
-Attaching an idle UE costs **OCUDU +9.9 W** but **OAI ≈ 0 W** (−0.2 W, within
-measurement noise; the B and C sample sets overlap). The same logical operation —
-bringing one UE to attached, synchronized, zero-traffic state — has an order-of-
-magnitude different energy cost between two Split 7.2x implementations on
-identical hardware.
-
-Consequently OAI serves one UE at ~100 Mbps for **+13.4 W over the platform
-floor**, versus **+23.4 W for OCUDU** — roughly **43 % less energy** for the same
-service, despite OAI idling 1.2 W *higher*. Idle power alone is therefore a poor
-predictor of serving efficiency.
-
-### F7 — Traffic is cheap on both stacks
-
-100 Mbps adds **+3.1 W (OCUDU)** and **+1.9 W (OAI)**. Both are small relative
-to the static and attach costs, reinforcing F2: DU energy is dominated by
-radio/state maintenance, not user-plane throughput.
-
-## 15. Validity note — the `threads` collector as a state verifier
-
-Two runs labelled `A-oai-no-gnb` (2026-07-23 10:34, 10:38) read **79.7 W**, far
-above the true A baseline of 66.4 W. The capture log identifies the cause: those
-runs show `collectors active: … threads …`, whereas genuine A runs show
-`collector threads SKIPPED: no process matching ('nr-softmodem',)`. The gNB was
-still running; the runs are mislabelled and are excluded from the ladder above
-(their 79.7 W matches the D-iperf runs, indicating traffic was also still active).
-
-**Method note:** the `threads` collector's SKIPPED/active status is an
-independent, machine-generated record of whether the gNB process existed during a
-capture. It should be used to validate every run's label — energy alone cannot
-distinguish a mislabelled condition, but this flag can.
-
-## 16. Open caveat — confirm UE attachment for OAI condition C
-
-The OAI result C ≈ B (−0.2 W) admits two readings that energy alone cannot
-separate:
-
-- **(a)** UE attachment genuinely costs OAI ~nothing — a substantive finding, or
-- **(b)** the UE did not attach during the C captures, making them a second B.
-
-Given OCUDU showed **+9.9 W** for the identical operation, positive confirmation
-of UE attachment (OAI telnet/log UE count > 0 during the C window) is required
-before F6 can be stated as final.
+The absence of C6 matters for standards work: O-RAN O-Cloud-ES use cases that
+assume per-NF C-state selection are not implementable on this platform, because
+the low-latency profile removes the deep C-states they rely on.
 
 ---
 
-## 17. OCUDU load curve — first sweep points
+## 5. Correction to an earlier finding
 
-| OCUDU condition | offered load | package-1 (W) | Δ prev |
-|---|---|---|---|
-| C — UE attached | 0 Mbps | 86.68 | — |
-| D — iperf | 100 Mbps | 89.78 | **+3.1** |
-| D — iperf | **200 Mbps** | **91.19** | **+1.4** |
+**Superseded claim.** An earlier analysis (2026-07-22 data) reported a UE-attach
+cost of **+9.9 W** for OCUDU (B = 76.83 → C = 86.68 W) and concluded that
+attaching an idle UE cost nearly as much as running the DU itself.
 
-### F8 — Energy-vs-load is sub-linear and flattening
+**This does not survive controlled re-measurement.** Under state-verified
+capture with a single unchanged configuration, OCUDU's attach cost is
+**+0.31 W** ( 3.2).
 
-The first 100 Mbps costs **+3.1 W**; the second 100 Mbps costs only **+1.4 W**.
-Doubling offered load did not double the traffic-related energy — the increment
-roughly halved. Combined with F3 (50 vs 100 Mbps indistinguishable) and F7
-(traffic cheap on both stacks), the picture is consistent: **DU energy is
-dominated by the always-on radio/state maintenance, and marginal energy per
-additional bit falls as load rises.**
+**Probable cause of the earlier result.** The 2026-07-22 B value (76.83 W) and
+this session's B value (86.75 W) differ by ~10 W — approximately the size of the
+spurious "attach cost". Moreover the earlier C value (86.68 W) is very close to
+the current B value (86.75 W). The most likely explanation is that **the gNB
+configuration changed between capturing B and C** in the earlier session, so the
+computed difference measured a configuration change rather than UE attachment.
 
-*Caveat:* the 200 Mbps figure is currently a single confirmed run (91.19 W);
-the other two captures in that batch have not yet been extracted. Treat as
-provisional until all three are averaged.
+**Lesson.** A difference between two conditions is meaningful only if everything
+except the intended variable is held constant. The state verification and
+single-session discipline of  1.3 exist to enforce exactly this. Per-run
+configuration archiving is what made the discrepancy diagnosable rather than
+merely confusing.
 
-## 18. Labelling and `GNB_COMM` caveats (method)
+---
 
-**The `--label` string is user-supplied metadata only.** The agent cannot
-observe:
-- the **iperf rate** — iperf runs on a separate host; the agent never sees it;
-- the **gNB stack** — identified solely by the `GNB_COMM` value passed in.
+## 6. Data-quality observations
 
-A batch captured on 2026-07-23 11:12–11:14 was labelled `D-oai-iperf-100M` but
-was in fact **OCUDU at 200 Mbps**. The energy (91.19 W) and the operator's record
-identify the true condition; the directory name does not. Labels must therefore
-be verified against the actual deployment at capture time.
+### 6.1 One outlier in OCUDU D-100M
 
-**Correction to §15.** The `threads SKIPPED` flag verifies only that *the process
-named in `GNB_COMM`* was absent — not that no gNB was running. In the batch
-above, `GNB_COMM=nr-softmodem` was passed while OCUDU (process `gnb`) was
-running, so the collector skipped on a **name mismatch**, losing per-thread data
-for those runs. The flag is a valid state check **only when `GNB_COMM` matches
-the stack under test**.
+| | |
+|---|---|
+| runs | 90.36, 90.40, **88.66** |
+| mean | 89.81 |
+| median | 90.36 |
+| spread | **1.74 W** (all other conditions: 0.01–0.16 W) |
+
+The third run is 1.7 W below the other two, with a spread ~10× every other
+condition. Most plausible cause: the iperf stream ended or stalled part-way
+through that 30 s window, so the capture partly measured condition C rather than
+D. Excluding it gives 90.38 W, which would raise the traffic cost from +2.75 to
++3.32 W.
+
+**Treatment:** the run is retained and reported, and the anomaly flagged rather
+than silently removed. The 100 Mbps figure should be re-measured with a longer
+iperf duration before being quoted as final.
+
+### 6.2 OCUDU configuration differs from the earlier TM500 ladder
+
+This session's OCUDU B (86.75 W) matches the earlier Pegatron-style
+configuration (86.89 W) rather than the TM500 2×2 configuration (76.83 W). The
+OAI and OCUDU numbers therefore compare **two working deployments**, not two
+identically-parameterised ones. The exact OCUDU radio/config for this session
+should be read from the archived `gnb-config.yml` before F4 is quoted as a
+like-for-like stack comparison.
+
+### 6.3 Slight control-socket drift under load
+
+pkg0 sits at 64.16–64.30 W in conditions B and C, and 64.37–64.49 W in the D
+conditions — a ~0.2 W rise correlated with traffic, plausibly kernel
+network-stack work on the housekeeping socket. It is small (0.8 % of the pkg1
+change) and does not affect the conclusions, but the control socket is not
+perfectly inert under traffic.
+
+### 6.4 The `threads` collector as an independent state verifier
+
+The agent's `threads` collector logs either
+`collector threads SKIPPED: no process matching (<name>)` or lists `threads`
+among the active collectors. This is a **machine-generated record of whether the
+named gNB process existed during the capture**, independent of the operator's
+label.
+
+It caught two mislabelled runs in an earlier session: two runs labelled
+`A-oai-no-gnb` read 79.7 W (far above the 66.4 W floor) and showed `threads`
+*active* — the gNB was still running. Energy alone could not have proven the
+label wrong; this flag could.
+
+**Important limitation.** The flag verifies only that *the process named in
+`GNB_COMM`* was absent — **not** that no gNB was running. In one batch,
+`GNB_COMM=nr-softmodem` was passed while OCUDU (process `gnb`) was running, so
+the collector skipped on a **name mismatch** and per-thread data was lost for
+those runs. The flag is a valid state check **only when `GNB_COMM` matches the
+stack under test** — which `capture.sh` now guarantees by setting it from the
+`stack` argument.
+
+### 6.5 Idle-capture flood in the InfluxDB bucket
+
+Approximately **1600 condition-A runs** exist from an earlier period of
+continuous `run_campaign.sh --watch` operation. These give excellent statistics
+for the platform floor, but they numerically dominate the bucket and bury the
+deliberate captures. The bucket should be cleaned (or the deliberate runs tagged
+distinctly) before it is used for dashboards or rApp queries.
+
+### 6.6 Condition A captured once, for OAI only
+
+A is a property of the node with no gNB running, so it is stack-independent and
+reused for both ladders. The OAI A measurement (66.36 W, spread 0.01) agrees
+with all prior A measurements (66.32–66.44 W across ~1600 earlier runs), so the
+reuse is justified — though a per-session A is preferable.
+
+---
+
+## 7. Summary
+
+| | OAI | OCUDU |
+|---|---|---|
+| A — platform floor | 66.36 W | 66.36 W |
+| B — DU running, no UE | 78.53 W (**+12.17**) | 86.75 W (**+20.39**) |
+| C — UE attached | 78.65 W (**+0.12**) | 87.06 W (**+0.31**) |
+| D — 100 Mbps | 80.11 W (**+1.45**) | 89.81 W (**+2.75**) |
+| D — 200 Mbps | — | 91.39 W (**+1.58**) |
+| **Total to serve 100 Mbps** | **+13.75 W** | **+23.45 W** |
+| Efficiency at 100 Mbps | **7.3 Mbit/s/W** | **4.3 Mbit/s/W** |
+| Occupancy failure mode | over-reads (100 % busy-poll) | under-reads (~0 %) |
+| PMU available to external telemetry | **no** (OAI holds it, F7) | yes |
+
+**In one sentence:** the DU's static cost accounts for ~88 % of its energy
+footprint, attaching a UE is essentially free, additional traffic is cheap and
+gets cheaper, OAI serves the same load for ~40 % less power than OCUDU, and CPU
+occupancy misreports all of it — in opposite directions on the two stacks.
+
+---
+
+## 8. Next steps
+
+1. **Re-measure OCUDU D-100M** with a longer iperf run to resolve the outlier
+   ( 6.1).
+2. **Record both stacks' configurations** for this session so F4 can be stated
+   as like-for-like or explicitly qualified ( 6.2).
+3. **Extend the load sweep** to 500 and 1000 Mbps to confirm F3's flattening
+   trend and map the efficiency curve of F5.
+4. **Capture per-session condition A** for each ladder rather than reusing one.
+5. **Measure occupancy under load** for both stacks to complete F6 — confirm
+   OAI's poll threads stay pinned at 100 % while energy rises, i.e. that
+   occupancy cannot distinguish idle from loaded.
+6. **Fix the agent's default `GNB_CONFIG_PATH`** — currently `/mnt/gnb_runtime`
+   (underscore) but the real directory is `/mnt/gnb-runtime` (hyphen), so config
+   archiving silently fails unless the path is passed explicitly.
+7. **Clean the InfluxDB bucket** of the ~1600 idle A-runs ( 6.5) so deliberate
+   captures are usable for dashboards and rApp queries.
+8. **Record IPC/MPKI under load for OCUDU** (available there, unlike OAI) to
+   test whether compute-per-cycle rises while occupancy stays flat — the
+   mechanism behind F6.
