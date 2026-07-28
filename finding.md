@@ -530,6 +530,110 @@ far preferable to spreading it across many lightly-loaded ones — a lightly-loa
 DU wastes most of its 20.5 W fixed cost.
 
 
+---
+
+# PART IV — PEGATRON RU + SAMSUNG UE (OAI, load sweep, DL)
+
+**Radio:** Pegatron RU. **UE:** Samsung. **Stack:** OAI (`nr-softmodem`).
+**Session:** 2026-07-28. Same radio and UE as Part III, **different RAN stack** —
+so this pairs directly with the OCUDU Pegatron sweep for a like-for-like
+cross-stack comparison on identical hardware. Captured with PMU collectors
+disabled (F7). Downlink; achieved throughput + loss from iperf3 receiver lines.
+
+> **Incomplete by design.** The sweep currently runs to 800 Mbps offered. The
+> OAI DL link saturates at ~700–720 Mbps on this cell (see F11); 800/900/1000 M
+> will be re-tested after the current OAI gNB limit around 720 Mbps is addressed.
+
+## 13. OAI + Pegatron energy ladder (DL)
+
+| Condition | offered | **achieved DL** | loss % | pkg1 (W) | Δ prev |
+|---|---|---|---|---|---|
+| A — no gNB | — | — | — | 66.30 | — |
+| B — gNB, no UE | — | — | — | 80.55 | **+14.25** |
+| C — UE attached | 0 | 0 | — | 80.56 | **+0.01** |
+| D | 100 Mbps | **100** | 0 | 82.21 | +1.65 |
+| D | 200 Mbps | **200** | 0 | 83.04 | +0.83 |
+| D | 300 Mbps | **300** | 0.001 | 84.14 | +1.10 |
+| D | 400 Mbps | **400** | 0.001 | 84.97 | +0.83 |
+| D | 500 Mbps | **500** | 0 | 85.56 | +0.59 |
+| D | 600 Mbps | **600** | 0 | 86.53 | +0.97 |
+| D | 700 Mbps | **698** | 0.37 | 87.29 | +0.76 |
+| D | 800 Mbps | **721** ⚠ | **9.8** | 87.65 | +0.36 |
+
+Every point is 3 runs, intra-group spread ≤ 0.19 W. pkg0 (control) stays
+64.39–64.64 W across all runs. Condition A reuses the stack-independent platform
+floor (66.30 W).
+⚠ At 800 Mbps offered the OAI DL link saturates: achieved 721 Mbps, 9.8 % loss.
+
+## 14. F11 — OAI has a lower delivered-throughput ceiling than OCUDU
+
+On the **same Pegatron RU and Samsung UE**, the two stacks reach different DL
+ceilings:
+
+| Stack | achieved at 700 M offered | achieved at 800 M offered | loss at 800 M | ceiling |
+|---|---|---|---|---|
+| **OCUDU** | 700 (0 %) | 800 (0.003 %) | negligible | **~919 Mbps** (Part III) |
+| **OAI** | 698 (0.37 %) | 721 (9.8 %) | heavy | **~700–720 Mbps** |
+
+OAI loses 9.8 % of a 800 Mbps offered load where OCUDU carries it cleanly. OAI's
+DL throughput saturates ~200 Mbps *lower* than OCUDU on identical radio hardware.
+This is consistent with the independent finding (TNSM, Guemdani et al., same
+OCUDU 2026.04) that **OAI's DL deficit localises to the DU-side MAC/RLC stack** —
+reduced PRB allocation, lower MCS, RLC buffer saturation under sustained load.
+Here that deficit appears as a lower delivered-throughput ceiling, and the
+energy curve flattens against it (F12).
+
+## 15. F12 — OAI energy-vs-load: same sub-linear shape, lower fixed cost
+
+Cost decomposition (to 700 Mbps, the clean pre-saturation range):
+
+| component | OAI | OCUDU (Part III) |
+|---|---|---|
+| DU static (A→B) | **+14.25 W** | +20.50 W |
+| UE attach (B→C) | +0.01 W (≈ free) | +0.24 W (≈ free) |
+| Traffic 0→700 Mbps (C→700M) | +6.73 W | +10.46 W |
+
+Both stacks show the same structure — a large fixed cost, a free UE attach, and
+sub-linear traffic — but **OAI's fixed DU cost is ~6 W lower** (14.25 vs 20.50 W).
+Marginal energy per 100 Mbps (OAI): 1.65 → 0.83 → 1.10 → 0.83 → 0.59 → 0.97 →
+0.76 W, then +0.36 W into saturation. The +0.36 W at "800 M" reflects only the
++23 Mbps of *actual* additional throughput delivered (698 → 721), not +100 —
+throughput saturation, exactly as in OCUDU's F10.
+
+## 16. F13 — Efficiency vs achieved throughput (OAI, DL)
+
+| achieved DL | incremental W | Mbit/s per W |
+|---|---|---|
+| 100 Mbps | 15.91 | 6.3 |
+| 300 Mbps | 17.84 | 16.8 |
+| 500 Mbps | 19.26 | 26.0 |
+| 700 Mbps | 20.99 | 33.3 |
+| **721 Mbps (max)** | 21.35 | **33.8** |
+
+At its ~721 Mbps ceiling OAI reaches **33.8 Mbit/s/W** — higher than OCUDU's
+27.6 Mbit/s/W at 919 Mbps, because OAI's fixed cost is lower. But OCUDU delivers
+~200 Mbps more absolute throughput. The trade-off: **OAI is more
+energy-efficient per bit within its narrower throughput envelope; OCUDU reaches
+a higher throughput ceiling at higher fixed energy cost.**
+
+## 17. Cross-stack summary on identical hardware (Pegatron + Samsung, DL)
+
+| | OAI | OCUDU |
+|---|---|---|
+| Platform floor (A) | 66.30 W | 66.30 W |
+| DU static (A→B) | **+14.25 W** | +20.50 W |
+| UE attach (B→C) | +0.01 W | +0.24 W |
+| Delivered-throughput ceiling | **~720 Mbps** | **~919 Mbps** |
+| Energy at ~700 Mbps | 87.29 W | 97.50 W |
+| Peak efficiency | 33.8 Mbit/s/W @721 M | 27.6 Mbit/s/W @919 M |
+| PMU available to telemetry | no (F7) | yes |
+
+**In one line:** on identical Pegatron + Samsung hardware, OAI runs ~6 W cheaper
+static and is more efficient per bit, but saturates ~200 Mbps lower than OCUDU —
+its DU-side MAC/RLC ceiling caps both throughput and the reachable energy range.
+
+---
+
 ## 8. Next steps
 
 1. **Re-measure OCUDU D-100M** with a longer iperf run to resolve the outlier
@@ -556,7 +660,12 @@ DU wastes most of its 20.5 W fixed cost.
 10. **Fix `capture.sh` to fold the rate into the label for condition C** (or
     reject a rate on C), so a C-with-rate run cannot be silently mislabelled
     (§9).
-11. **Probe beyond the ceiling** — the Pegatron + Samsung link tops out at
-    ~919 Mbps (8.1 % loss at 1 Gbps offered). A higher-capability UE or a
-    DL-oriented TDD pattern would extend the measurable energy-vs-throughput
-    curve past 919 Mbps.
+11. **Probe beyond the ceilings** — OCUDU tops out ~919 Mbps and OAI ~720 Mbps
+    on this cell. A higher-capability UE or DL-oriented TDD pattern would extend
+    both curves.
+12. **Complete the OAI Pegatron sweep to 800/900/1000 Mbps** once the OAI DL
+    limit around 720 Mbps is resolved (Part IV is currently to 800 M offered /
+    721 M achieved).
+13. **Add uplink sweeps** for both stacks (UE as iperf client, core as server);
+    label captures distinctly (e.g. `D-<stack>-UL-<rate>M`) so UL and DL do not
+    mix in analysis.
