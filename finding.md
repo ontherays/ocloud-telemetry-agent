@@ -634,6 +634,129 @@ its DU-side MAC/RLC ceiling caps both throughput and the reachable energy range.
 
 ---
 
+---
+
+# PART V — OCUDU CU + DU SPLIT (disaggregated, Pegatron + Samsung, DL)
+
+**Deployment:** OCUDU in **disaggregated CU + DU** mode — CU-UP a separate pod,
+DU a separate pod, joined by **F1-U over a Linux kernel bridge** (`ocudu-f1-br`).
+Contrast with Parts I–IV, which were **monolithic** (CU+DU in one process).
+**Radio:** Pegatron. **UE:** Samsung. **Session:** 2026-07-31.
+
+**Labelling note.** The capture script did not yet have distinct condition names
+for the split components, so all runs were entered under the `A` condition with
+descriptive rate strings. They are decoded here:
+
+| Command entered | True state |
+|---|---|
+| `A` | no gNB |
+| `A cu` | **CU only** deployed (no DU) |
+| `A cudu` | **CU + DU** deployed, no UE |
+| `A cuduue` | CU + DU + **UE attached**, no traffic |
+| `A iperf<R>M` | CU + DU + UE + iperf at rate R |
+
+## 18. CU + DU split ladder (both sockets reported)
+
+| State | offered | **achieved DL** | loss % | pkg1 (W) | **pkg0 (W)** |
+|---|---|---|---|---|---|
+| no gNB | — | — | — | 66.38 | 64.20 |
+| CU only | — | — | — | 66.38 | 64.33 |
+| CU + DU, no UE | — | — | — | 87.12 | 64.57 |
+| + UE attached | 0 | 0 | — | 87.36 | 64.56 |
+| iperf 100M | 100 | **100** | 0 | 92.05 | **65.39** |
+| iperf 200M | 200 | **200** | 0 | 92.98 | **66.69** |
+| iperf 300M | 300 | **300** | 0 | 93.90 | **67.69** |
+| iperf 400M | 400 | **400** | 0 | 94.78 | **68.81** |
+| iperf 500M | 500 | **500** | 0 | 95.52 | **69.88** |
+| iperf 600M | 600 | **600** | 0.001 | 96.47 | **70.45** |
+| iperf 700M | 700 | **700** | 0.004 | 97.34 | **71.20** |
+| iperf 800M | 800 | **737** ⚠ | **7.9** | 97.17 | **71.26** |
+
+3 runs each. ⚠ At 800M offered the split path saturates: 737 Mbps achieved,
+7.9 % loss — the CU+DU delivered-throughput ceiling is **~740 Mbps**.
+
+## 19. F14 — The CU-UP user-plane cost appears on the CONTROL socket
+
+This is the headline result of the split deployment, and it is only visible
+*because* the deployment is disaggregated.
+
+In every monolithic ladder (Parts I–IV), **pkg0 (socket 0, the control socket)
+stayed flat** — 64.2–64.8 W regardless of load. Under CU+DU split, **pkg0 rises
+steadily with traffic**:
+
+| load | pkg0 (W) | pkg0 rise over idle |
+|---|---|---|
+| idle (CU+DU) | 64.57 | — |
+| 100 Mbps | 65.39 | +0.82 |
+| 400 Mbps | 68.81 | +4.24 |
+| 700 Mbps | 71.20 | +6.63 |
+| 800 Mbps (737 ach) | 71.26 | +6.69 |
+
+The DU runs on socket 1 (pkg1). The **CU-UP pod and the F1-U kernel-bridge
+forwarding run on socket 0 (pkg0)** — so splitting the gNB physically relocates
+the user-plane packet-processing energy onto the *other* socket, where it scales
+with traffic. The monolithic deployment did this work in-process on socket 1 and
+it was folded into pkg1; the split exposes it as a distinct, socket-0 cost.
+
+**Implication for energy attribution:** measuring only the DU socket
+*understates* a disaggregated gNB's true energy by the CU-UP + F1-U cost — here
+up to **+6.7 W**, growing with load. A per-NF energy model (O-RAN O-Cloud-ES)
+must attribute the CU-UP's socket-0 consumption separately; a DU-socket-only
+measurement misses it entirely. This is a concrete argument for the per-function
+telemetry the disaggregated architecture is meant to enable.
+
+## 20. F15 — Full-node serving cost and the split's throughput penalty
+
+Counting **both sockets** (pkg1 DU + pkg0 CU-UP/bridge rise over the no-gNB
+floor) gives the true node cost of serving traffic:
+
+| achieved DL | node incremental W (pkg1+pkg0) | Mbit/s per W (node) |
+|---|---|---|
+| 100 Mbps | 26.86 | 3.7 |
+| 300 Mbps | 31.01 | 9.7 |
+| 500 Mbps | 34.82 | 14.4 |
+| 700 Mbps | 37.96 | 18.4 |
+| 737 Mbps (max) | 37.85 | 19.5 |
+
+The split's peak node efficiency (**19.5 Mbit/s/W** at its 737 Mbps ceiling) is
+markedly **below the monolithic 27.6 Mbit/s/W at 919 Mbps** (F10) — the split
+pays both a **throughput penalty** (~740 vs ~919 Mbps, ~19 % lower) and an
+**energy penalty** (the extra socket-0 forwarding cost).
+
+### Why the split tops out ~740 Mbps (air interface is not the limiter)
+
+The radio is not the bottleneck: same MCS / RI / CQI, 0 % BLER, same grant rate
+as the monolithic case. The deficit is in the newly-exposed user-plane path:
+
+1. **F1-U over a Linux kernel bridge** (`ocudu-f1-br`) — software forwarding with
+   GTP-U encap/decap and extra memory copies + context switches between the DU
+   and CU-UP pods. Unlike the fronthaul, this hop is **not DPDK-accelerated**.
+2. **Separate CU-UP process** — user-plane data crosses a pod boundary through
+   the kernel networking stack, where the monolithic did it in-process.
+3. **Result:** the DU is fed in smaller / burstier chunks (lower `dl_bs`), so the
+   scheduler under-fills grants — same number of grants, ~20 % fewer bits each →
+   lower `brate`.
+
+## 21. F16 — Monolithic vs CU+DU trade-off (same radio + UE)
+
+| Cost dimension | Monolithic (Part III) | CU + DU split (Part V) |
+|---|---|---|
+| Peak DL throughput | ~923 Mbps | ~745 Mbps (~19 % lower) |
+| DU-socket idle (B) | 86.80 W | 87.12 W (≈ same) |
+| User-plane processing | in-process on socket 1 | 2 pods + kernel-bridge forwarding on socket 0 |
+| Control-socket under load | flat ~64 W | rises to ~71 W (+6.7 W) |
+| Peak node efficiency | 27.6 Mbit/s/W @919 M | 19.5 Mbit/s/W @737 M |
+| DL latency | lowest (in-process) | + F1-U encap + bridge hop |
+| Orchestration | 1 pod | 2 pods + F1 network |
+| What it buys | simplicity, max throughput | independent CP/UP scaling, standard F1/E1 multivendor interfaces, **per-function (CU-UP vs DU) telemetry & energy attribution**, fault isolation |
+
+The disaggregation costs throughput and energy but buys the standardized
+interfaces and **per-function energy attribution** that the monolithic
+deployment structurally cannot provide — and F14 is the direct measurement of
+what that attribution reveals.
+
+---
+
 ## 8. Next steps
 
 1. **Re-measure OCUDU D-100M** with a longer iperf run to resolve the outlier
@@ -669,3 +792,12 @@ its DU-side MAC/RLC ceiling caps both throughput and the reachable energy range.
 13. **Add uplink sweeps** for both stacks (UE as iperf client, core as server);
     label captures distinctly (e.g. `D-<stack>-UL-<rate>M`) so UL and DL do not
     mix in analysis.
+14. **Add explicit condition labels to `capture.sh`** for split deployments
+    (CU-only, CU+DU, CU+DU+UE) so runs are not overloaded onto the `A` label
+    (Part V decode).
+15. **Measure the CU-UP's cores directly** (per-thread on socket 0) to attribute
+    the +6.7 W (F14) to F1-U bridge forwarding vs CU-UP processing.
+16. **Note on shared-testbed hygiene:** the `capture.sh` state guard caught a
+    foreign `oai-cu` deployment (namespace `e2-test`) running on the node during
+    this campaign; verify OAI Part IV was unaffected by re-capturing OAI B on a
+    clean node.
